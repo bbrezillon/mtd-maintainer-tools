@@ -1,0 +1,19 @@
+#!/bin/sh
+# License: GPLv2, see: http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+
+PROJNAME=$1
+PROJURL=$2
+PWID=$3
+BRANCH=$4
+COMMIT=$5
+EXTRA=$6
+
+echo "Patch $PWID accepted (commit $COMMIT on $PROJURL $BRANCH)"
+
+pwclient update -s Accepted $PWID
+
+if [ -f .patchwork/$PWID.original ]; then
+	thanks-for-patch $PROJNAME $PROJURL $BRANCH $COMMIT $PWID
+	git send-email --confirm=never --quiet .patchwork/reply-$PWID.txt
+	rm -f .patchwork/reply-$PWID.txt .patchwork/$PWID.original
+fi

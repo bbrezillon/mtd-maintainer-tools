@@ -1,0 +1,54 @@
+#!/bin/sh
+# License: GPLv2, see: http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+
+remote="$1"
+url="$2"
+proj=""
+projurl=""
+
+if [ "$remote" = "mtd" ]; then
+	proj="linux-mtd"
+	projurl="http://git.infradead.org/linux-mtd.git"
+else
+	exit 0;
+fi
+
+echo "pre-push hook $url $remote"
+z40=0000000000000000000000000000000000000000
+
+while read local_ref local_sha remote_ref remote_sha
+do
+	echo "remote_ref = $remote_ref local_ref = $local_ref"
+	if [ "$local_sha" = $z40 ]; then continue; fi
+	if [ "$remote_sha" = $z40 ]; then continue; fi
+	if [ "$local_ref" != "refs/heads/nand/next" ] && [ "$local_ref" != "refs/heads/nand/fixes" ] && [ "$local_ref" != "refs/heads/mtd/next" ] && [ "$local_ref" != "refs/heads/mtd/fixes" ] && [ "$local_ref" != "refs/heads/spi-nor/next" ] && [ "$local_ref" != "refs/heads/spi-nor/fixes" ]; then continue; fi
+
+	#Make sure all commits have my SoB
+#	range="origin/master..$local_sha"
+#	commits=`git rev-list "$range"`
+#	for commit in $commits; do
+#		git show --oneline $commit|grep "Merge ">/dev/null
+#		if [ $? -eq 0 ]; then continue; fi
+#		git show $commit|grep "Signed-off-by: Boris Brezillon">/dev/null
+#		if [ $? -ne 0 ]; then
+#			echo "Missing SoB on"
+#			git show --oneline $commit
+#			exit 1
+#		fi
+#	done
+
+	# Update to existing branch, examine new commits
+	range="$remote_sha..$local_sha"
+
+	commits=`git rev-list "$range"`
+	for commit in $commits; do
+		pwid=`git notes show $commit 2>/dev/null | grep "pw " | sed -e 's/^"//'  -e 's/"$//' | cut -d " " -f 2`
+		if [ -n "$pwid" ]; then
+			branch=`echo $remote_ref|cut -c 12-`
+			patch-accepted $proj $projurl $pwid $branch $commit
+			git notes remove $commit
+		fi
+	done
+done
+
+exit 0

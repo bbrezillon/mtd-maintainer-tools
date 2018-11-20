@@ -1,0 +1,202 @@
+#!/usr/bin/python2
+# License: GPLv3, see: https://www.gnu.org/licenses/gpl-3.0.html
+# Copied from https://github.com/mpe/patchwork-scripts
+
+from __future__ import print_function
+
+import email
+import requests
+import os
+import sys
+import re
+import yaml
+from datetime import datetime
+from subprocess import check_output
+
+# Override with ~/.thanks-for-patch.yaml
+# eg:
+# korg-url: https://git.kernel.org/foo/c/
+# dont-thank: Your Name <you@domain.com>
+
+DEFAULTS = {
+    'korg-url'          : 'https://git.kernel.org/yourrepo/c/',
+    'x-header-tag'      : 'your-project',
+    'strip-domain'      : 'your-domain.com',
+    'from'              : 'Your Name <patch-notifications@your-domain.com>',
+    'dont-thank'        : 'Your Name <you@your-domain.com>',
+    'applied-msg'       : 'Applied to your-project',
+    'salutation'        : "y'all come back now!",
+    'strip-subj-prefix' : 'fooproject',
+}
+
+def load_config():
+  options = DEFAULTS
+  try:
+      f = open(os.path.expanduser('~/.thanks-for-patch.yaml'))
+  except IOError:
+      pass
+  else:
+      options.update(yaml.safe_load(f))
+
+  return options
+
+
+def korg_url(base_url, commit):
+    if not base_url.endswith('/'):
+        base_url += '/'
+    return '%s%s' % (base_url, commit[:26])
+
+
+def flatten_newlines(s):
+    if not s:
+        return ''
+    return s.replace('\n', '')
+
+
+def prepare_message(options, branch, commit, msg, dst):
+    date_tuple = email.utils.parsedate_tz(msg['Date'])
+    timestamp = email.utils.mktime_tz(date_tuple)
+    date = datetime.utcfromtimestamp(timestamp)
+    date_str = date.strftime('%a, %Y-%m-%d at %H:%M:%S UTC')
+
+    def write_header(header, val):
+        dst.write('%s: %s\n' % (header, val))
+
+    def copy_header(old_header, new_header, prefix=''):
+        val = flatten_newlines(msg[old_header])
+        write_header(new_header, '%s%s' % (prefix, val))
+
+    write_header('X-%s-patch-notification' % options['x-header-tag'], 'thanks')
+    write_header('X-%s-patch-commit' % options['x-header-tag'], commit)
+    copy_header('Message-ID', 'In-Reply-To')
+
+    sender = flatten_newlines(msg['From'])
+    l = flatten_newlines(msg['To']).split(',')
+    l = [s for s in l if options['strip-domain'] not in s]
+    l = [s.strip() for s in l]
+    l.insert(0, sender)
+    to = ', '.join(l)
+
+    write_header('To', to)
+    write_header('From', options['from'])
+    copy_header('Cc', 'Cc')
+    copy_header('Subject', 'Subject', prefix='Re: ')
+
+    sender_name = sender.split('<')[0].strip()
+    dst.write('\nOn %s, %s wrote:\n' % (date_str, sender_name))
+
+    seen_sobs = False
+    for line in msg.get_payload().splitlines():
+        if 'Signed-off-by' in line:
+            seen_sobs = True
+
+        if seen_sobs and (len(line.strip()) == 0 or line.strip() == '---'):
+            break
+
+        dst.write('> ' + line + '\n')
+
+    dst.write('\nApplied to %s %s' % (options['korg-url'], branch))
+
+    if sender == options['dont-thank']:
+        dst.write('.\n')
+    else:
+        dst.write(', thanks.\n')
+
+#    dst.write('\n%s\n' % korg_url(options['korg-url'], commit))
+    dst.write('\n%s\n' % options['salutation'])
+
+
+def url_ok(url):
+    r = requests.get(url)
+    if r.status_code != 200:
+        return False
+
+    # cgit returns a valid page with an error in the text
+    if 'Bad commit reference' in r.text or \
+       'Bad object id' in r.text:
+        return False
+
+    return True
+
+
+def get_subject(msg, strip_subj_prefix):
+    subj = flatten_newlines(msg['Subject'])
+
+    subj = subj.replace('RESEND', '')
+    subj = subj.replace('FIX', '')
+    subj = subj.replace('RFC', '')
+
+    subj = subj.lower()
+
+    subj = re.sub('(.*)%s/([^:]*):(.*)' % strip_subj_prefix, r'\1 \3', subj)
+
+    for c in [']', '(', ')', ':', '&', '#', '%', '[', '*', '"', "'", '{', '}']:
+        subj = subj.replace(c, '')
+
+    subj = re.sub('(.*)([0-9])+/([0-9]+)(.*)', r'\1\2 of \3\4', subj)
+    subj = re.sub('(.*)v[0-9]+(.*)', r'\1 \2', subj)
+
+    subj = subj.replace(';', ' ')
+    subj = subj.replace(',', ' ')
+    subj = subj.replace('/', '-')
+    subj = subj.replace('\\', '-')
+    subj = subj.replace('>', '-')
+    subj = subj.replace('<', '-')
+    subj = subj.replace('|', '-')
+    subj = subj.replace('@', '-')
+    subj = subj.replace('!', '-')
+    subj = subj.strip()
+    subj = subj.replace(' ', '-')
+
+    while '--' in subj:
+        subj = subj.replace('--', '-')
+
+    return subj
+
+
+def main(args):
+    if len(args) < 5:
+        print("Usage: %s <proj-name> <proj-url> <branch name> <commit> <patchwork ID>" % os.path.basename(sys.argv[0]))
+        return 1
+
+    projname = args[0]
+    projurl = args[1]
+    branch = args[2]
+    commit = args[3]
+    pid = args[4]
+
+    options = load_config()
+
+    commit = check_output(('git rev-parse %s' % commit).split()).strip()
+
+    options['korg-url'] = projurl
+    options['x-header-tag'] = projname
+
+    # Check the commit exists on kernel.org
+    url = korg_url(options['korg-url'], commit)
+    # if not url_ok(url):
+    #    print("Error: couldn't retrieve commit from kernel.org", url)
+    #    return 1
+
+    try:
+        body = open('.patchwork/%s.original' % pid).read()
+    except IOError as e:
+        print("Error: couldn't open original patch!", e)
+        return 1
+
+#    base_branch = branch.split('/', 1)[-1]
+
+    msg = email.message_from_string(body)
+    subject = get_subject(msg, options['strip-subj-prefix'])
+
+    fname = '.patchwork/reply-%s.txt' % (pid)
+
+    with open(fname, 'w') as out:
+        prepare_message(options, branch, commit, msg, out)
+
+#    print('Wrote review as', fname)
+
+    return 0
+
+
+sys.exit(main(sys.argv[1:]))
