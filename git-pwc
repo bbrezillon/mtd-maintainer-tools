@@ -91,6 +91,7 @@ main() {
         error "no Patchwork project set\n"
     fi
 
+    lore="https://lore.kernel.org/${pw_prj}"
     # We do not want to work on master
     gbranch="$( git branch 2>/dev/null | sed -re '/^\* (.*)/!d; s//\1/;' )"
     if [ "${gbranch}" = "master" -a "${master_ok}" = "false" ]; then
@@ -106,13 +107,14 @@ main() {
     if [ ${age} -ge ${maxage} ]; then
         trace "Patchwork cache too cold, retrieving patch list for %s..." "${pw_prj}"
 	echo "pwclient command: pwclient list -p "${pw_prj}" "${pw_n}" -s New ${pw_filter}"
-        pwclient list -p "${pw_prj}" "${pw_n}" -s New ${pw_filter} |tail -n +3 >"${pwcache}"
+        pwclient list -p "${pw_prj}" "${pw_n}" -a no -s New -f "%{id} %{state} %{_msgid_} %{name}" ${pw_filter} |tail -n +3 >"${pwcache}"
         printf " done\n"
     fi
 
     # Build the list of patches
-    while read id _ subject; do
+    while read id _ msgid subject; do
         ids+=( ${id} )
+	msgids+=( [${id}]="${msgid}" )
         subjects+=( [${id}]="${subject}" )
     done < <( tac "${pwcache}" )
 
@@ -149,11 +151,16 @@ main() {
     fi
 
     for id in "${selected[@]}"; do
-        pwclient view ${id} > .patchwork/${id}.original
+        pwclient view -p "${pw_prj}" ${id} > .patchwork/${id}.original
+        link="Link: ${lore}/${msgids[${id}]}"
         if ! git am .patchwork/${id}.original -s; then
             rm -f .patchwork/${id}.original
             error "failed to apply patch #%s %s\n" "${id}" "${subject[${id}]}"
         else
+            git log -1 --pretty=%B | \
+                sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' | \
+                sed "\$a${link}" | \
+                git commit --amend -F-
             git notes add -m "pw ${id}"
         fi
     done
